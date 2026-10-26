@@ -431,6 +431,21 @@
       pointer-events: none;
       text-transform: uppercase;
     }
+    .a-zoom-controls {
+      position: absolute;
+      top: 14px; right: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .a-zoom-controls .a-btn {
+      width: 28px; height: 28px;
+      padding: 0;
+      justify-content: center;
+      background: rgba(240,234,216,0.92);
+      font-size: 0.9rem;
+    }
+    .a-zoom-controls .a-btn:last-child { font-size: 0.7rem; }
 
     /* ── EDGE POLARITY POPUP ── */
     .a-edge-pop {
@@ -623,7 +638,12 @@
         <g id="edgeBadges"></g>
       </svg>
     </div>
-    <div class="a-hint">Click to add · Drag to move · Del to remove · Esc to deselect</div>
+    <div class="a-zoom-controls">
+      <button type="button" id="zoomIn" class="a-btn" aria-label="Zoom in" title="Zoom in">+</button>
+      <button type="button" id="zoomOut" class="a-btn" aria-label="Zoom out" title="Zoom out">&minus;</button>
+      <button type="button" id="zoomReset" class="a-btn" aria-label="Reset view" title="Reset view">&#x2922;</button>
+    </div>
+    <div class="a-hint">Click to add · Drag to move · Scroll to pan · Ctrl+scroll to zoom · Del to remove · Esc to deselect</div>
     <div id="edgePop" class="a-edge-pop"></div>
   </div>
 
@@ -734,6 +754,52 @@ const gEdge = document.getElementById('edges');
 const gHex  = document.getElementById('hexes');
 const gBadge = document.getElementById('edgeBadges');
 
+// ─── Pan / zoom ───────────────────────────────────────────────────────────────
+// The canvas is infinite: viewBox tracks which region of hex-space is visible.
+// BASE_W/BASE_H is the viewBox size at zoom level 1 (the app's original fixed
+// canvas size); zooming shrinks/grows the viewBox, panning slides it, and
+// nothing about hex coordinates, drag, or click-to-add changes — svgCoords()
+// already maps through the live viewBox via getScreenCTM().
+const BASE_W = 1400, BASE_H = 900;
+const ZOOM_MIN = 0.25, ZOOM_MAX = 4;
+let viewBox = { x: 0, y: 0, w: BASE_W, h: BASE_H };
+function applyViewBox() {
+  svg.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`);
+}
+// Zoom by `factor` (>1 = in, <1 = out) keeping the point (px, py) — in SVG user
+// space — fixed on screen, e.g. the cursor position or the current view center.
+function zoomBy(factor, px, py) {
+  const newW = Math.min(Math.max(viewBox.w / factor, BASE_W / ZOOM_MAX), BASE_W / ZOOM_MIN);
+  const actualFactor = viewBox.w / newW;
+  const newH = viewBox.h / actualFactor;
+  const fracX = (px - viewBox.x) / viewBox.w;
+  const fracY = (py - viewBox.y) / viewBox.h;
+  viewBox = { x: px - fracX * newW, y: py - fracY * newH, w: newW, h: newH };
+  applyViewBox();
+  renderGrid();
+}
+function resetView() {
+  viewBox = { x: 0, y: 0, w: BASE_W, h: BASE_H };
+  applyViewBox();
+  renderGrid();
+}
+svg.addEventListener('wheel', e => {
+  e.preventDefault();
+  const [px, py] = svgCoords(e);
+  if (e.ctrlKey || e.metaKey) {
+    zoomBy(Math.exp(-e.deltaY * 0.01), px, py);
+  } else {
+    const rect = svg.getBoundingClientRect();
+    viewBox.x += e.deltaX * (viewBox.w / rect.width);
+    viewBox.y += e.deltaY * (viewBox.h / rect.height);
+    applyViewBox();
+    renderGrid();
+  }
+}, { passive: false });
+document.getElementById('zoomIn').addEventListener('click', () => zoomBy(1.2, viewBox.x + viewBox.w / 2, viewBox.y + viewBox.h / 2));
+document.getElementById('zoomOut').addEventListener('click', () => zoomBy(1 / 1.2, viewBox.x + viewBox.w / 2, viewBox.y + viewBox.h / 2));
+document.getElementById('zoomReset').addEventListener('click', resetView);
+
 function hexPoints(cx, cy, r) {
   const pts = [];
   for (let i = 0; i < 6; i++) {
@@ -831,17 +897,21 @@ async function _flushIconFetch() {
 }
 
 // ─── Grid ─────────────────────────────────────────────────────────────────────
+// Tiles over the current viewBox, not a fixed canvas size, so the dot/hex grid
+// still covers what's on screen after panning away from the origin.
 function renderGrid() {
   gGrid.innerHTML = '';
   if (!showGrid) return;
   const r = hexSize;
-  const w = parseFloat(svg.getAttribute('width'));
-  const h = parseFloat(svg.getAttribute('height'));
   const colW = r * Math.sqrt(3);
   const rowH = r * 1.5;
-  for (let row = 0; row * rowH < h + r; row++) {
-    for (let col = 0; col * colW < w + r; col++) {
-      const cx = col * colW + (row % 2 === 1 ? colW / 2 : 0);
+  const rowStart = Math.floor(viewBox.y / rowH) - 1;
+  const rowEnd   = Math.ceil((viewBox.y + viewBox.h) / rowH) + 1;
+  const colStart = Math.floor(viewBox.x / colW) - 1;
+  const colEnd   = Math.ceil((viewBox.x + viewBox.w) / colW) + 1;
+  for (let row = rowStart; row <= rowEnd; row++) {
+    for (let col = colStart; col <= colEnd; col++) {
+      const cx = col * colW + (row % 2 !== 0 ? colW / 2 : 0);
       const cy = row * rowH;
       gGrid.appendChild(svgEl('polygon', {
         points: hexPoints(cx, cy, r),
@@ -852,14 +922,19 @@ function renderGrid() {
 }
 
 // ─── Snap ─────────────────────────────────────────────────────────────────────
+// Nearest grid anchor to (x, y), searched locally rather than brute-forced over
+// a bounded canvas — needed once the canvas (and hex positions) are unbounded.
+// The anchor nearest any point always falls among the 3x3 anchors straddling
+// its row/column estimate, since colW/rowH are fixed fractions of hexSize.
 function snapPos(x, y) {
   const r = hexSize, colW = r * Math.sqrt(3), rowH = r * 1.5;
   let bestDist = Infinity, bestX = x, bestY = y;
-  const rows = Math.ceil(parseFloat(svg.getAttribute('height')) / rowH) + 2;
-  const cols = Math.ceil(parseFloat(svg.getAttribute('width'))  / colW) + 2;
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < cols; col++) {
-      const cx = col * colW + (row % 2 === 1 ? colW / 2 : 0);
+  const rowGuess = Math.round(y / rowH);
+  for (let row = rowGuess - 1; row <= rowGuess + 1; row++) {
+    const offset = (row % 2 !== 0 ? colW / 2 : 0);
+    const colGuess = Math.round((x - offset) / colW);
+    for (let col = colGuess - 1; col <= colGuess + 1; col++) {
+      const cx = col * colW + offset;
       const cy = row * rowH;
       const d = Math.hypot(x - cx, y - cy);
       if (d < bestDist) { bestDist = d; bestX = cx; bestY = cy; }
@@ -1518,10 +1593,10 @@ svg.addEventListener('click', e => {
 });
 
 document.getElementById('btnAddHex').addEventListener('click', () => {
-  const w = parseFloat(svg.getAttribute('width')), h = parseFloat(svg.getAttribute('height'));
-  // Nudge each new keyboard-added hex so a rapid run doesn't stack on one spot.
+  // Center on the current view, not the original fixed canvas — the user may
+  // have panned elsewhere. Nudge each new hex so a rapid run doesn't stack.
   const n = hexes.length;
-  addHexAt(w / 2 + (n % 5) * hexSize, h / 2 + Math.floor(n / 5) * hexSize, { focus: true });
+  addHexAt(viewBox.x + viewBox.w / 2 + (n % 5) * hexSize, viewBox.y + viewBox.h / 2 + Math.floor(n / 5) * hexSize, { focus: true });
 });
 
 // ─── Drag (mouse) ─────────────────────────────────────────────────────────────
@@ -2531,6 +2606,38 @@ function demo() {
   ok(![...document.getElementById('edgeBadges').querySelectorAll('text')].some(t => t.textContent === '+' || t.textContent === '–'), 'no +/- badge when collectPolarity off');
   [hexes, edgeData, collectPolarity, collectMagnitude, collectDirection] = s8;
   syncDimensionCheckboxes(); render();
+
+  // Pan/zoom: infinite canvas — snap and the grid must stay correct far from
+  // the origin, and zoom must clamp and keep the focal point fixed on screen.
+  {
+    const savedVb = viewBox;
+    const [sx, sy] = snapPos(10050, 10040);
+    ok(Math.hypot(sx - 10050, sy - 10040) < hexSize, 'snapPos finds a nearby anchor far from the origin');
+    const colW = hexSize * Math.sqrt(3), shift = 5000 * colW; // exact grid pitch: row parity unaffected
+    const [sx2, sy2] = snapPos(10050 + shift, 10040);
+    ok(Math.abs(sx2 - sx - shift) < 1 && Math.abs(sy2 - sy) < 1, 'snapPos anchors are translation-consistent at large offsets');
+
+    const savedShowGrid = showGrid; showGrid = true;
+    viewBox = { x: 10000, y: 10000, w: BASE_W, h: BASE_H };
+    renderGrid();
+    ok(gGrid.children.length > 0, 'grid renders when panned far from the origin');
+    showGrid = savedShowGrid;
+
+    viewBox = { x: 0, y: 0, w: BASE_W, h: BASE_H };
+    zoomBy(2, 0, 0);
+    ok(Math.abs(viewBox.w - BASE_W / 2) < 1e-6, 'zoomBy(2) halves the viewBox width');
+    ok(Math.abs(viewBox.x) < 1e-6 && Math.abs(viewBox.y) < 1e-6, 'zooming at (0,0) keeps that point fixed');
+    zoomBy(1000, 0, 0); // try to zoom in far past the clamp
+    ok(viewBox.w >= BASE_W / ZOOM_MAX - 1e-6, 'zoomBy clamps to ZOOM_MAX');
+    zoomBy(1e-6, 0, 0); // try to zoom out far past the clamp
+    ok(viewBox.w <= BASE_W / ZOOM_MIN + 1e-6, 'zoomBy clamps to ZOOM_MIN');
+    resetView();
+    ok(viewBox.x === 0 && viewBox.y === 0 && viewBox.w === BASE_W && viewBox.h === BASE_H, 'resetView restores the original view');
+
+    viewBox = savedVb;
+    applyViewBox();
+    renderGrid();
+  }
 
   console.log('demo: all checks passed');
 }

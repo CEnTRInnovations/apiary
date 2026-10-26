@@ -67,7 +67,7 @@ Each hexagon is a plain JavaScript object stored in the `hexes` array:
 }
 ```
 
-Mutable globals: `hexes`, `nextId`, `selectedId`, `hexSize`, `snapToGrid`, `showGrid`, `newColor`, `activePalette`, `dragging`, `edgeData`, `collectPolarity`, `collectMagnitude`, `collectDirection`.
+Mutable globals: `hexes`, `nextId`, `selectedId`, `hexSize`, `snapToGrid`, `showGrid`, `newColor`, `activePalette`, `dragging`, `edgeData`, `collectPolarity`, `collectMagnitude`, `collectDirection`, `viewBox`.
 
 `edgeData` is a plain object `{ [edgeKey]: { polarity?, magnitude?, direction? } }` — optional per-edge classifications, each dimension gated by its `collect*` parameter (all default off). `polarity` is `±1`, `magnitude` is `1`–`3`, `direction` is `'forward'` / `'reverse'` relative to `edgeKey`'s sort order (unset = bidirectional). Keyed on the sorted, lowercased term-label pair via `edgeKey(a, b)`, so classifications survive a Save→Load round-trip. Helpers `edgeField(key, field)` / `setEdgeField(key, field, value)` read and write single fields; setting `null`/`undefined` deletes the field, and an emptied entry is deleted whole.
 
@@ -78,8 +78,9 @@ Mutable globals: `hexes`, `nextId`, `selectedId`, `hexSize`, `snapToGrid`, `show
 | Function | Purpose |
 |---|---|
 | `hexPoints(cx, cy, r)` | Generates the 6 SVG polygon points for a hex |
-| `renderGrid()` | Draws the snap-to-grid dot overlay |
-| `snapPos(x, y)` | Maps a raw position to the nearest grid anchor |
+| `renderGrid()` | Draws the snap-to-grid dot overlay, tiled over the current `viewBox` region |
+| `snapPos(x, y)` | Maps a raw position to the nearest grid anchor, via a local 3×3 search around the row/column estimate (not a canvas-bounded scan — correct at any pan distance) |
+| `zoomBy(factor, px, py)` / `resetView()` | Scales `viewBox` by `factor` (clamped to `ZOOM_MIN`/`ZOOM_MAX`) keeping the SVG-space point `(px, py)` fixed on screen; `resetView()` restores the original `0 0 1400 900` view |
 | `getAdjacent()` | Returns all touching hex pairs (proximity-based) |
 | `getClusters(pairs)` | Union-find over adjacent pairs → cluster arrays |
 | `renderAdjacency()` | Writes the adjacency list and cluster count to the panel |
@@ -156,7 +157,24 @@ An explicit neutral polarity (`0`) is still not exposed; unclassified and neutra
 
 ## Snap-to-Grid
 
-Grid spacing is derived from `hexSize`: columns are offset by `hexSize * 1.5`, rows by `hexSize * Math.sqrt(3)`, with alternating column offsets to produce a proper hexagonal tessellation. `snapPos(x, y)` finds the nearest grid anchor via brute-force search over a bounded range of candidate cells.
+Grid spacing is derived from `hexSize`: columns are offset by `hexSize * 1.5`, rows by `hexSize * Math.sqrt(3)`, with alternating column offsets to produce a proper hexagonal tessellation. `snapPos(x, y)` finds the nearest grid anchor by checking the 3×3 block of anchors around the row/column nearest `(x, y)` — the true nearest anchor to any point always falls in that block, since `colW`/`rowH` are fixed fractions of `hexSize`. This search is independent of canvas size or position, which matters now that hexes can be placed arbitrarily far from the origin.
+
+---
+
+## Pan / Zoom
+
+The canvas is infinite and zoomable, by default (no toggle). `viewBox = { x, y, w, h }` is the SVG-space window currently on screen; `applyViewBox()` writes it to the `<svg viewBox>` attribute. `BASE_W`/`BASE_H` (1400×900, the app's original fixed canvas size) is the view size at zoom level 1; `ZOOM_MIN`/`ZOOM_MAX` (0.25–4) clamp how far `viewBox.w` can shrink/grow.
+
+Hex coordinates, click-to-add, and drag are **unaffected** by panning/zooming — `svgCoords(e)` already maps pointer events through the live viewBox via `getScreenCTM().inverse()`, so it stays correct for any `viewBox`. `hexSize` is a model-space unit, constant across zoom levels (hexes get visually bigger/smaller as you zoom, same as the rest of the canvas).
+
+Two things *do* depend on the current view and are kept viewBox-aware: `renderGrid()` (tiles the grid dots to cover `viewBox`, not a fixed `0..1400 × 0..900` region) and the keyboard "Add to canvas" button (centers new hexes on `viewBox`'s current center, not the original fixed canvas center). `snapPos(x, y)` does not need this — see Snap-to-Grid above.
+
+**Controls:**
+- **Scroll / two-finger trackpad swipe** pans (`wheel` event without `ctrlKey`/`metaKey`): the CSS-pixel `deltaX`/`deltaY` is converted to SVG-space units via the canvas's rendered size (`getBoundingClientRect()` vs. `viewBox.w`/`h`).
+- **Ctrl+scroll / pinch** zooms (`wheel` with `ctrlKey` — browsers report trackpad pinch as `ctrlKey: true`), centered on the pointer, via `zoomBy()`.
+- The **+ / − / reset** buttons (`.a-zoom-controls`, top-right of the canvas) call `zoomBy(1.2, …)` / `zoomBy(1/1.2, …)` centered on the current view, and `resetView()`.
+
+Pan/zoom state is session-only view state, not part of the data model — like hex positions, it's never written to `.bee`/CSV.
 
 ---
 
