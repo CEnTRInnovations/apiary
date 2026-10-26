@@ -1742,7 +1742,7 @@ document.getElementById('btnExportCSV').addEventListener('click', () => {
 document.getElementById('btnSave').addEventListener('click', () => {
   const label = getContributorLabel();
   const pairs = adjacentTermPairs();
-  if (pairs.length === 0) { alert('No adjacent labeled pairs to save.'); return; }
+  if (hexes.length === 0) { alert('Nothing on the canvas to save.'); return; }
   const bee = {
     version: '1.0',
     contributor: { label, id: hashId(label) },
@@ -1776,18 +1776,31 @@ document.getElementById('btnSave').addEventListener('click', () => {
       bee.nodes.push(node);
     });
   }
+  // Apiary-specific full-session snapshot (additionalProperties: true — Hive
+  // ignores it like `dimensions`/`palette`/`nodes`). Unlike `edges`/`nodes`,
+  // this covers every hex including isolated ones and carries exact position,
+  // size, free-choice color, and icon, so Load can restore the session exactly
+  // instead of re-laying it out from the edge graph. Keyed by id (not label),
+  // so duplicate labels don't collide the way they would in `edges`/`nodes`.
+  bee.hexes = hexes.map(h => {
+    const hx = { id: h.id, text: h.text || '', color: h.color, x: h.x, y: h.y, size: h.size };
+    if (h.icon) hx.icon = h.icon;
+    return hx;
+  });
   dl(new Blob([JSON.stringify(bee, null, 2)], { type: 'application/json' }), `${slugify(label)}.bee`);
 });
 
-// Rebuild a hex canvas from a .bee file's edges. Positions aren't part of the
-// .bee spec, so hexes are re-laid-out on the same hex grid used by snap-to-grid.
-// A cell is only ever given to a term if every already-placed grid-neighbor of
-// that cell is a real graph-neighbor of the term — that's what guarantees this
-// never fabricates an adjacency that wasn't in the file. The tradeoff is
-// completeness, not correctness: a term connected to more than 6 others, or
-// part of a tight cluster/triangle, may not show every one of its edges as
-// touching once reloaded, but nothing touches that shouldn't. Terms with no
-// edge at all can't be represented — the .bee format only carries edges.
+// Rebuild a hex canvas from a parsed .bee file. When the file carries Apiary's
+// `hexes` snapshot extension, the canvas is restored exactly (see below). Only
+// for a file without one — not part of the spec, so not every .bee file has
+// it — are hexes re-laid-out from `edges` onto the same hex grid used by
+// snap-to-grid. A cell is only ever given to a term if every already-placed
+// grid-neighbor of that cell is a real graph-neighbor of the term — that's
+// what guarantees this never fabricates an adjacency that wasn't in the file.
+// The tradeoff is completeness, not correctness: a term connected to more than
+// 6 others, or part of a tight cluster/triangle, may not show every one of its
+// edges as touching once reloaded, but nothing touches that shouldn't. Terms
+// with no edge at all can't be represented this way — see the snapshot path.
 function loadBeeData(data) {
   const edgesRaw = Array.isArray(data && data.edges) ? data.edges : [];
   edgeData = {};
@@ -1843,6 +1856,38 @@ function loadBeeData(data) {
   }
 
   syncDimensionCheckboxes();
+
+  // Apiary-specific full-session snapshot (see Save) — when present, restores
+  // every hex exactly (position, size, color, icon, including isolated hexes)
+  // instead of re-laying the canvas out from the edge graph below.
+  const snapshot = Array.isArray(data && data.hexes) ? data.hexes : null;
+  if (snapshot && snapshot.length) {
+    let maxId = 0;
+    hexes = snapshot.map((h, i) => {
+      const id = Number.isFinite(h && h.id) ? h.id : i + 1;
+      maxId = Math.max(maxId, id);
+      const hx = {
+        id,
+        text: String((h && h.text) || ''),
+        color: String((h && h.color) || paletteHexes()[i % paletteHexes().length]),
+        x: Number(h && h.x) || 0,
+        y: Number(h && h.y) || 0,
+        size: Number(h && h.size) || hexSize,
+      };
+      if (h && h.icon) hx.icon = String(h.icon);
+      return hx;
+    });
+    nextId = maxId + 1;
+    selectedId = null;
+    const label = (data.contributor && data.contributor.label) || '';
+    if (label) document.getElementById('contributorLabelInput').value = label;
+    buildNewColorPicker();
+    render();
+    return;
+  }
+
+  // Fallback for .bee files with no snapshot (older Apiary saves, or files
+  // from another Hive contributor): reconstruct a layout from the edge graph.
   const adj = new Map();
   function ensureTerm(t) { if (!adj.has(t)) adj.set(t, new Set()); }
   edgesRaw.forEach(e => {
@@ -2352,6 +2397,43 @@ function demo() {
 
     [hexes, edgeData, activePalette, newColor, selectedId, nextId] = sv;
     document.getElementById('contributorLabelInput').value = sv[6];
+    buildNewColorPicker(); render();
+  }
+
+  // .bee `hexes` snapshot: Save/Load round-trip an isolated hex (no edges —
+  // previously undroppable from the file) and preserves exact position, a
+  // free-choice (neutral-palette) color, and an icon, instead of re-laying out.
+  {
+    const sv2 = [hexes, edgeData, activePalette, newColor, selectedId, nextId,
+                 document.getElementById('contributorLabelInput').value];
+    activePalette = 'neutral';
+    hexes = [
+      { id: 1, text: 'connected', color: '#A8DADC', x: 37, y: -58, size: 72 },
+      { id: 2, text: 'also-connected', color: '#A8DADC', x: 139, y: -58, size: 72 },
+      { id: 3, text: 'loner', color: '#D4956A', x: -900, y: 450, size: 60, icon: 'mdi:star' },
+    ];
+    edgeData = {}; selectedId = null;
+    document.getElementById('contributorLabelInput').value = 'Q';
+    const cap2 = [];
+    const RealBlob2 = window.Blob, realDl2 = dl;
+    dl = () => {};
+    window.Blob = function (parts, opts) { cap2.push(String(parts[0])); return new RealBlob2(parts, opts); };
+    document.getElementById('btnSave').click();
+    dl = realDl2; window.Blob = RealBlob2;
+    const bee2 = JSON.parse(cap2[0]);
+    ok(bee2.hexes.length === 3, '.bee snapshot includes every hex, including the isolated one');
+    ok(bee2.hexes.find(h => h.text === 'loner').icon === 'mdi:star', '.bee snapshot carries icon');
+
+    hexes = [];
+    loadBeeData(bee2);
+    ok(hexes.length === 3, 'loadBeeData restores the isolated hex the edge graph alone would drop');
+    const loner = hexes.find(h => h.text === 'loner');
+    ok(loner.x === -900 && loner.y === 450, 'loadBeeData restores exact position via the snapshot, not a re-layout');
+    ok(loner.color === '#D4956A', 'loadBeeData restores free-choice (neutral-palette) color exactly');
+    ok(loner.icon === 'mdi:star', 'loadBeeData restores icon');
+
+    [hexes, edgeData, activePalette, newColor, selectedId, nextId] = sv2;
+    document.getElementById('contributorLabelInput').value = sv2[6];
     buildNewColorPicker(); render();
   }
 
