@@ -344,6 +344,12 @@
       box-shadow: inset 0 0 0 1px rgba(62,59,53,0.15); transform: translateY(1px);
     }
     .a-palette-legend-row b { color: var(--text); }
+    .a-palette-legend .a-key-input {
+      flex: 1; min-width: 0; padding: 0.15rem 0.35rem;
+      font: inherit; color: var(--text); background: var(--bg-light);
+      border: 1px solid var(--border); border-radius: 3px;
+    }
+    .a-palette-legend .a-key-input:focus { outline: 2px solid var(--primary); outline-offset: 0; }
 
     /* ── ICON SUGGESTIONS (idon) ── */
     .a-icon-suggestions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0.25rem 0 0.75rem; min-height: 34px; }
@@ -544,13 +550,13 @@
       <input id="newText" type="text" placeholder="Type and click canvas to add" style="margin-bottom:0.75rem" />
       <label class="a-label">Icon</label>
       <div id="newIconSuggestions" class="a-icon-suggestions"></div>
-      <label class="a-label">Color</label>
-      <div id="newColorPicker"></div>
       <button id="btnAddHex" type="button" class="a-btn a-btn--primary" style="width:100%;justify-content:center;margin-top:0.9rem;">
         <svg class="a-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>
         Add to canvas
       </button>
       <p class="a-muted" style="margin-top:0.5rem;">Or click anywhere on the canvas. Once a hexagon has focus, arrow keys move it and Delete removes it.</p>
+      <label class="a-label" style="margin-top:0.9rem">Color</label>
+      <div id="newColorPicker"></div>
     </div>
 
     <!-- Edit hex (shown when a hex is selected — same slot as New Hexagon) -->
@@ -659,7 +665,8 @@
 const PALETTES = {
   neutral: {
     name: 'Earth tones',
-    colors: ['#E8A838', '#C47C1A', '#F2C96E', '#3B6B35', '#3F5E78', '#A8DADC', '#8C6E45', '#7A4A62', '#5A7A46', '#B5838D', '#6D6875', '#C9CBA3', '#E9C46A', '#90BE6D', '#D4956A'].map(hex => ({ hex })),
+    editable: true, // free-choice: the user writes the key (`meaning`) per colour; saved in .bee `colorKey`
+    colors: ['#E8A838', '#C47C1A', '#F2C96E', '#3B6B35', '#3F5E78', '#A8DADC', '#8C6E45', '#7A4A62', '#5A7A46', '#B5838D', '#6D6875', '#C9CBA3', '#E9C46A', '#90BE6D', '#D4956A'].map(hex => ({ hex, meaning: '' })),
   },
   strategic: {
     name: 'Strategic (4-mode)',
@@ -1431,6 +1438,8 @@ function renderSelectedEditor() {
 // ─── Colour swatches ─────────────────────────────────────────────────────────
 // Keyboard-operable radio group over the active palette: Tab to the row,
 // arrows/Enter to pick. `getColor` is a live getter for the current hex colour.
+const keyTip = c => c.meaning ? (c.ref ? `${c.ref} — ${c.meaning}` : c.meaning) : '';
+
 function buildSwatches(getColor, onPick) {
   const colors = paletteColors();
   const cur = () => String(getColor() || '').toLowerCase();
@@ -1446,8 +1455,9 @@ function buildSwatches(getColor, onPick) {
     s.className = 'a-swatch' + (selected ? ' active' : '');
     s.style.background = c.hex;
     s.setAttribute('role', 'radio');
-    s.setAttribute('aria-label', c.meaning ? `${c.ref} — ${c.meaning}` : 'Colour ' + c.hex);
-    if (c.meaning) s.title = `${c.ref} — ${c.meaning}`;
+    s.dataset.hex = c.hex;
+    s.setAttribute('aria-label', keyTip(c) || 'Colour ' + c.hex);
+    if (c.meaning) s.title = keyTip(c);
     s.setAttribute('aria-checked', String(selected));
     s.tabIndex = selected || (i === 0 && !known) ? 0 : -1;
     s.addEventListener('click', () => onPick(c.hex));
@@ -1487,7 +1497,35 @@ function renderColorPicker(el, { getColor, onPick }) {
 
   el.appendChild(buildSwatches(getColor, onPick));
 
-  const meanings = paletteColors().filter(c => c.meaning);
+  if (PALETTES[activePalette].editable) {
+    const leg = document.createElement('div');
+    leg.className = 'a-palette-legend';
+    paletteColors().forEach(c => {
+      const r = document.createElement('div');
+      r.className = 'a-palette-legend-row';
+      const dot = document.createElement('span');
+      dot.className = 'a-palette-legend-dot'; dot.style.background = c.hex;
+      const inp = document.createElement('input');
+      inp.type = 'text'; inp.className = 'a-key-input'; inp.dataset.hex = c.hex;
+      inp.value = c.meaning; inp.placeholder = 'Add a meaning…';
+      inp.setAttribute('aria-label', 'Meaning of colour ' + c.hex);
+      inp.addEventListener('input', () => {
+        c.meaning = inp.value;
+        // The New and Edit pickers share this key: keep the other copy and the tooltips in step.
+        document.querySelectorAll('.a-key-input').forEach(o => { if (o !== inp && o.dataset.hex === c.hex) o.value = c.meaning; });
+        document.querySelectorAll('.a-swatch').forEach(o => {
+          if (o.dataset.hex !== c.hex) return;
+          o.title = keyTip(c);
+          o.setAttribute('aria-label', keyTip(c) || 'Colour ' + c.hex);
+        });
+      });
+      r.append(dot, inp);
+      leg.appendChild(r);
+    });
+    el.appendChild(leg);
+  }
+
+  const meanings = paletteColors().filter(c => c.meaning && !PALETTES[activePalette].editable);
   if (meanings.length) {
     const leg = document.createElement('div');
     leg.className = 'a-palette-legend';
@@ -1776,6 +1814,18 @@ document.getElementById('btnSave').addEventListener('click', () => {
       bee.nodes.push(node);
     });
   }
+  // Colour key (Apiary-specific, same legality): the active palette's meanings, for
+  // all three palettes — fixed for the semantic ones, user-written for Earth tones
+  // (only colours given a meaning). Which palette they belong to is `palette`
+  // (absent = neutral).
+  const colorKey = paletteColors().filter(c => c.meaning).map(c => {
+    const e = { hex: c.hex };
+    if (c.ref) e.ref = c.ref;
+    if (c.slug) e.slug = c.slug;
+    e.meaning = c.meaning;
+    return e;
+  });
+  if (colorKey.length) bee.colorKey = colorKey;
   // Apiary-specific full-session snapshot (additionalProperties: true — Hive
   // ignores it like `dimensions`/`palette`/`nodes`). Unlike `edges`/`nodes`,
   // this covers every hex including isolated ones and carries exact position,
@@ -1810,6 +1860,14 @@ function loadBeeData(data) {
   newColor = paletteColors()[0].hex;
   const hexBySlug = {};
   paletteColors().forEach(c => { if (c.slug) hexBySlug[c.slug] = c.hex; });
+  // Earth-tone key is user-written: replace it with the file's (or clear it).
+  PALETTES.neutral.colors.forEach(c => { c.meaning = ''; });
+  if (activePalette === 'neutral' && Array.isArray(data && data.colorKey)) {
+    data.colorKey.forEach(k => {
+      const c = k && typeof k.hex === 'string' && PALETTES.neutral.colors.find(x => x.hex.toLowerCase() === k.hex.toLowerCase());
+      if (c && typeof k.meaning === 'string') c.meaning = k.meaning;
+    });
+  }
   const catByLabel = {};
   if (Array.isArray(data && data.nodes)) {
     data.nodes.forEach(n => {
@@ -2366,7 +2424,7 @@ function demo() {
     activePalette = 'neutral'; newColor = paletteColors()[0].hex;
     buildNewColorPicker();
     ok(document.querySelectorAll('#newColorPicker .a-swatch').length === PALETTES.neutral.colors.length, 'neutral palette renders all its swatches');
-    ok(!document.querySelector('#newColorPicker .a-palette-legend'), 'neutral palette shows no legend');
+    ok(document.querySelectorAll('#newColorPicker .a-key-input').length === PALETTES.neutral.colors.length, 'neutral palette shows an editable key row per colour');
     activePalette = 'systems'; newColor = paletteColors()[0].hex;
     buildNewColorPicker();
     ok(document.querySelectorAll('#newColorPicker .a-swatch').length === 10, 'systems palette renders 10 swatches');
@@ -2394,6 +2452,26 @@ function demo() {
     loadBeeData(bee);
     ok(activePalette === 'systems', 'loadBeeData restores the palette');
     ok(hexes.find(h => h.text === 'growth').color === PALETTES.systems.colors[6].hex, 'loadBeeData recolours nodes from their category');
+    ok(bee.colorKey.length === 10 && bee.colorKey[6].slug === 'idea' && bee.colorKey[6].meaning, '.bee carries the systems colour key');
+
+    // Earth-tone key: user-written, round-trips through Save/Load, cleared by a file without one
+    activePalette = 'neutral';
+    const c0 = PALETTES.neutral.colors[0];
+    c0.meaning = 'Core concept';
+    buildNewColorPicker();
+    const inp = document.querySelector('#newColorPicker .a-key-input');
+    inp.value = 'Edited'; inp.dispatchEvent(new Event('input'));
+    ok(c0.meaning === 'Edited' && document.querySelector('#newColorPicker .a-swatch').title === 'Edited', 'editing a key row updates the key and swatch tooltip');
+    cap.length = 0; dl = () => {}; window.Blob = function (parts, opts) { cap.push(String(parts[0])); return new RealBlob(parts, opts); };
+    document.getElementById('btnSave').click();
+    dl = realDl; window.Blob = RealBlob;
+    const nbee = JSON.parse(cap[0]);
+    ok(nbee.colorKey.length === 1 && nbee.colorKey[0].hex === c0.hex && nbee.colorKey[0].meaning === 'Edited', '.bee carries only the Earth-tone colours given a meaning');
+    c0.meaning = '';
+    loadBeeData(nbee);
+    ok(c0.meaning === 'Edited', 'loadBeeData restores the Earth-tone key');
+    delete nbee.colorKey; loadBeeData(nbee);
+    ok(c0.meaning === '', 'loadBeeData clears the key when the file has none');
 
     [hexes, edgeData, activePalette, newColor, selectedId, nextId] = sv;
     document.getElementById('contributorLabelInput').value = sv[6];
